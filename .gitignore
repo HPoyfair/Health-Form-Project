@@ -1,0 +1,23 @@
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.spec
+.env
+.venv/
+venv/
+ENV/
+# Build/packaging
+build/
+dist/
+*.egg-info/
+# OS
+.DS_Store
+Thumbs.db
+# IDE
+.vscode/
+.idea/
+# TkinterDnD caches (none special, keeping generic)
+EOF
