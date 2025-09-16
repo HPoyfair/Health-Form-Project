@@ -3,6 +3,8 @@ import csv
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
+import subprocess, threading
+
 
 # --- Drag & Drop support (optional) -----------------------------------------
 try:
@@ -36,6 +38,9 @@ class CsvCombinerGUI(BaseTk):
         self._build_left_panel()
         self._build_right_panel()
         self._build_statusbar()
+
+        self._install_menu()
+
 
     # ========================= Left panel (inputs)
     def _build_left_panel(self):
@@ -319,6 +324,124 @@ class CsvCombinerGUI(BaseTk):
         self.input_list.delete(0, tk.END)
         for p in self.input_files:
             self.input_list.insert(tk.END, f"{p.name}   —   {p.parent}")
+
+        # ======== Menu
+    def _install_menu(self):
+        menubar = tk.Menu(self)
+        helpmenu = tk.Menu(menubar, tearoff=0)
+        helpmenu.add_command(label="Check for updates…", command=self.check_for_updates)
+        menubar.add_cascade(label="Help", menu=helpmenu)
+        self.config(menu=menubar)
+
+    # ======== Update: compare local HEAD to remote and prompt
+    def check_for_updates(self):
+        """Check whether the current branch is behind origin/<branch> (non-blocking)."""
+        # Run in background so UI stays responsive
+        def worker():
+            try:
+                app_dir = Path(__file__).resolve().parent
+                if not (app_dir / ".git").exists():
+                    self.after(0, lambda: tk.messagebox.showinfo(
+                        "Updates",
+                        "This folder is not a git repository.\nUse packaged updates instead."
+                    ))
+                    return
+
+                # Which branch are we on?
+                branch = self._git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=app_dir)
+
+                # Fetch remote info for this branch
+                self._git(["fetch", "origin", branch], cwd=app_dir)
+
+                local = self._git(["rev-parse", "--short", "HEAD"], cwd=app_dir)
+                remote = self._git(["rev-parse", "--short", f"origin/{branch}"], cwd=app_dir)
+
+                if local == remote:
+                    self.after(0, lambda: tk.messagebox.showinfo(
+                        "You're up to date",
+                        f"Local {branch}: {local}\nRemote {branch}: {remote}"
+                    ))
+                    return
+
+                # How many commits behind?
+                ahead = self._git(["rev-list", "--left-right", "--count", f"HEAD...origin/{branch}"], cwd=app_dir)
+                # Format: "<ahead> <behind>" when comparing HEAD (left) vs origin/branch (right)
+                try:
+                    ahead_n, behind_n = map(int, ahead.split())
+                except Exception:
+                    ahead_n = behind_n = None
+
+                def prompt():
+                    msg = [f"Local {branch}:  {local}",
+                        f"Remote {branch}: {remote}",
+                        ""]
+                    if behind_n is not None:
+                        msg.append(f"Your branch is {behind_n} commit(s) behind, {ahead_n} ahead.")
+                    msg.append("\nFast-forward pull now?")
+                    if tk.messagebox.askyesno("Update available", "\n".join(msg)):
+                        self.update_now(branch)
+                self.after(0, prompt)
+
+            except Exception as e:
+                self.after(0, lambda: tk.messagebox.showerror("Update check failed", str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def update_now(self, branch: str):
+        """Do a fast-forward pull from origin/<branch> (non-blocking)."""
+        if hasattr(self, "status_var"):
+            self.status_var.set("Updating from origin…")
+
+        def worker():
+            try:
+                app_dir = Path(__file__).resolve().parent
+                # Make sure we’re on the right branch and have an upstream
+                self._git(["checkout", branch], cwd=app_dir)
+                # Ensure our local branch tracks origin/branch (safe if already set)
+                try:
+                    self._git(["branch", "-u", f"origin/{branch}", branch], cwd=app_dir)
+                except Exception:
+                    pass
+                # Fast-forward only (no merge commits)
+                self._git(["pull", "--ff-only", "origin", branch], cwd=app_dir)
+
+                def ok():
+                    if hasattr(self, "status_var"):
+                        self.status_var.set("Updated. Please restart the app.")
+                    tk.messagebox.showinfo("Updated", "Pulled latest changes.\nPlease restart the app.")
+                self.after(0, ok)
+
+            except Exception as e:
+                def fail():
+                    if hasattr(self, "status_var"):
+                        self.status_var.set("Update failed.")
+                    tk.messagebox.showerror(
+                        "Update failed",
+                        f"{e}\n\nIf you have local edits, commit or stash them, then try again."
+                    )
+                self.after(0, fail)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ======== Helper to run git and capture output (raises on error)
+    def _git(self, args, cwd: Path) -> str:
+        """Run a git command and return stdout (stripped). Raises on failure."""
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            shell=False
+        )
+        if proc.returncode != 0:
+            # Prefer stderr; fall back to stdout
+            msg = proc.stderr.strip() or proc.stdout.strip() or f"git {' '.join(args)} failed"
+            raise RuntimeError(msg)
+        return proc.stdout.strip()
+
+
+
+        
 
 
 if __name__ == "__main__":
