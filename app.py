@@ -10,13 +10,13 @@ import sys, json, urllib.request, hashlib, tempfile, webbrowser, platform, os
 # App constants
 # ---------------------------------------------------------------------------
 APP_NAME = "HealthForm"
-APP_VERSION = "0.1.5"   # bump when you cut a new release
+APP_VERSION = "0.1.7"   # logo placement test (under the Output CSV row)
 # Use the STABLE "raw" URL (no revision hash) so edits to the Gist are seen:
 UPDATE_MANIFEST_URL = (
     "https://gist.githubusercontent.com/HPoyfair/429ed78559d6247b16f8386acb6e8330/raw/manifest.json"
 )
 
-# Simple blue theme color (visible change)
+# Simple blue theme color
 COLOR_BG = "#1e90ff"  # DodgerBlue
 
 
@@ -36,14 +36,12 @@ except Exception:
 class CsvCombinerGUI(BaseTk):
     def __init__(self):
         super().__init__()
-        self._set_icon()
-
 
         # ---- Window basics
         self.title("CSV Combiner — GUI Shell")
         self.geometry("900x520")
 
-        # ---- Blue theme
+        # ---- Blue theme (frames/labels)
         self.configure(bg=COLOR_BG)
         style = ttk.Style(self)
         style.configure("Blue.TFrame", background=COLOR_BG)
@@ -82,8 +80,8 @@ class CsvCombinerGUI(BaseTk):
 
         self.input_list = tk.Listbox(
             list_wrap,
-            selectmode=tk.EXTENDED,     # ctrl/shift multi-select
-            exportselection=False       # keep selection when focus changes
+            selectmode=tk.EXTENDED,
+            exportselection=False
         )
         self.input_list.grid(row=0, column=0, sticky="nsew")
 
@@ -109,17 +107,17 @@ class CsvCombinerGUI(BaseTk):
         ttk.Button(btns, text="Remove selected", command=self.remove_selected).grid(row=0, column=1, sticky="ew", padx=6)
         ttk.Button(btns, text="Clear", command=self.clear_inputs).grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
-    # ========================= Right panel (output)
+    # ========================= Right panel (output + logo beneath)
     def _build_right_panel(self):
         right = ttk.Frame(self, padding=12, style="Blue.TFrame")
         right.grid(row=0, column=1, sticky="nsew")
-        right.columnconfigure(0, weight=1)  # Entry should stretch horizontally
+        right.columnconfigure(0, weight=1)
 
         ttk.Label(right, text="Output CSV file", style="Blue.TLabel").grid(row=0, column=0, sticky="w")
 
         row = ttk.Frame(right, style="Blue.TFrame")
         row.grid(row=1, column=0, sticky="ew", pady=(6, 6))
-        row.columnconfigure(0, weight=1)    # make the Entry expand
+        row.columnconfigure(0, weight=1)
 
         # Entry <-> StringVar two-way binding
         self.output_entry = ttk.Entry(row, textvariable=self.output_path_var)
@@ -128,9 +126,43 @@ class CsvCombinerGUI(BaseTk):
         ttk.Button(row, text="Choose…", command=self.choose_output).grid(row=0, column=1, padx=(6, 0))
         ttk.Label(right, text="Tip: pick a name like combined.csv", style="Blue.TLabel").grid(row=2, column=0, sticky="w")
 
+        # ---- Dino logo UNDER the output row (aligned to the right)
+                # ---- Dino logo centered UNDER the output row
+       # ---- Centered, larger dino logo (under the tip)
+        try:
+            logo_path = self._resource_path("dinologo.png")
+            src = tk.PhotoImage(file=logo_path)
+
+            # upscale to ~300 px wide using integer zoom (no Pillow needed)
+            target_w = 380
+            z = max(1, round(target_w / src.width()))
+            img = src.zoom(z, z)
+            # if we overshoot a lot, gently downsample
+            if img.width() > target_w:
+                div = max(1, round(img.width() / target_w))
+                if div > 1:
+                    img = img.subsample(div, div)
+
+            self._logo_image = img  # keep a reference
+
+            # flexible area that takes remaining vertical space
+            right.rowconfigure(3, weight=1)
+            logo_area = ttk.Frame(right, style="Blue.TFrame")
+            logo_area.grid(row=3, column=0, sticky="nsew", pady=(8, 8))
+            logo_area.columnconfigure(0, weight=1)
+            logo_area.rowconfigure(0, weight=1)
+
+            # centered horizontally and vertically (no sticky)
+            ttk.Label(logo_area, image=self._logo_image, style="Blue.TLabel").grid(
+                row=0, column=0
+            )
+        except Exception as e:
+            print("Logo load failed:", e)
+
+
+
     # ========================= Status bar
     def _build_statusbar(self):
-        # Keep default style so the status text is readable over a neutral background
         bar = ttk.Frame(self, padding=(12, 6))
         bar.grid(row=1, column=0, columnspan=2, sticky="ew")
         bar.columnconfigure(0, weight=1)
@@ -139,7 +171,6 @@ class CsvCombinerGUI(BaseTk):
 
     # ========================= Button callbacks
     def add_csvs(self):
-        """Ask for CSV files and append unique ones to the model."""
         paths = filedialog.askopenfilenames(
             title="Select CSV files",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
@@ -171,7 +202,7 @@ class CsvCombinerGUI(BaseTk):
         if not sel:
             self.status_var.set("Nothing selected.")
             return
-        for idx in reversed(sel):   # delete from back so indices don't shift
+        for idx in reversed(sel):
             del self.input_files[idx]
         self._refresh_input_list()
         self.status_var.set(f"Removed {len(sel)} file(s). Total: {len(self.input_files)}")
@@ -185,7 +216,6 @@ class CsvCombinerGUI(BaseTk):
         self.status_var.set("Cleared all input files.")
 
     def choose_output(self):
-        """Pick an output .csv via Save As; suggest first input's folder when available."""
         initial_dir = str(self.input_files[0].parent) if self.input_files else str(Path.home())
         path = filedialog.asksaveasfilename(
             title="Save combined CSV as…",
@@ -202,7 +232,6 @@ class CsvCombinerGUI(BaseTk):
 
     # ========================= Listbox events
     def _on_input_double_click(self, event):
-        """Open preview for the row under the mouse."""
         index = self.input_list.nearest(event.y)
         if index < 0 or index >= len(self.input_files):
             return
@@ -211,10 +240,9 @@ class CsvCombinerGUI(BaseTk):
 
     # ========================= Drag & Drop handler
     def _on_drop_files(self, event):
-        """Handle files dropped from the OS onto the Listbox."""
         if not event.data:
             return
-        raw_paths = self.tk.splitlist(event.data)  # handles braces/spaces
+        raw_paths = self.tk.splitlist(event.data)
         existing = set(self.input_files)
         added = 0
         for s in raw_paths:
@@ -233,7 +261,6 @@ class CsvCombinerGUI(BaseTk):
 
     # ========================= CSV preview
     def _open_csv_preview(self, path: Path, max_rows: int = 200):
-        """Open a Toplevel window showing a preview of the CSV."""
         if not path.exists():
             messagebox.showerror("Preview error", f"File not found:\n{path}")
             return
@@ -283,7 +310,6 @@ class CsvCombinerGUI(BaseTk):
             messagebox.showerror("Preview error", f"Could not read file:\n{path}\n\n{last_err}")
             return
 
-        # Normalize widths
         num_cols = max(len(header), max((len(r) for r in rows), default=0))
         if not header:
             header = [f"col{i+1}" for i in range(num_cols)]
@@ -291,7 +317,6 @@ class CsvCombinerGUI(BaseTk):
         for r in rows:
             r += [""] * (num_cols - len(r))
 
-        # Build the preview window
         win = tk.Toplevel(self)
         win.title(f"Preview — {path.name}")
         win.geometry("900x500")
@@ -339,9 +364,7 @@ class CsvCombinerGUI(BaseTk):
     def _install_menu(self):
         menubar = tk.Menu(self)
         helpmenu = tk.Menu(menubar, tearoff=0)
-        # Unified checker (uses git when running from a repo, manifest otherwise)
         helpmenu.add_command(label="Check for updates…", command=self.check_for_updates_unified)
-        # Optional explicit entries while you're testing:
         helpmenu.add_separator()
         helpmenu.add_command(label="Check for updates (client)…", command=self.check_for_updates_packaged)
         helpmenu.add_command(label="Check for updates (dev/git)…", command=self.check_for_updates)
@@ -350,7 +373,6 @@ class CsvCombinerGUI(BaseTk):
 
     # ========================= Dev/git updater (for repo clones)
     def check_for_updates(self):
-        """Check whether the current branch is behind origin/<branch> (non-blocking)."""
         def worker():
             try:
                 app_dir = Path(__file__).resolve().parent
@@ -394,7 +416,6 @@ class CsvCombinerGUI(BaseTk):
         threading.Thread(target=worker, daemon=True).start()
 
     def update_now(self, branch: str):
-        """Do a fast-forward pull from origin/<branch> (non-blocking)."""
         if hasattr(self, "status_var"):
             self.status_var.set("Updating from origin…")
 
@@ -440,7 +461,6 @@ class CsvCombinerGUI(BaseTk):
         return proc.stdout.strip()
 
     def check_for_updates_unified(self, silent: bool = False):
-        """Use git-based updates for dev clones, or manifest-based for packaged clients."""
         app_dir = Path(__file__).resolve().parent
         in_git = (app_dir / ".git").exists()
         is_frozen = getattr(sys, "frozen", False)  # True in PyInstaller builds
@@ -451,7 +471,6 @@ class CsvCombinerGUI(BaseTk):
 
     # ========================= Client/manifest updater (for packaged apps)
     def check_for_updates_packaged(self, silent: bool = False):
-        """Fetch manifest and compare version to latest (non-blocking)."""
         if hasattr(self, "status_var"):
             self.status_var.set("Checking for updates…")
 
@@ -483,11 +502,11 @@ class CsvCombinerGUI(BaseTk):
                 self.status_var.set("Ready")
             return
 
-        plat = platform.system().lower()   # "windows", "darwin", "linux"
+        plat = platform.system().lower()
         section = data["windows"] if plat == "windows" else data.get("mac", {})
-        url  = section.get("url")
-        page = section.get("page") or data.get("page", "")
-        sha  = section.get("sha256", "")
+        url = section.get("url")
+        page = section.get("page")
+        sha = section.get("sha256", "")
         if not url:
             messagebox.showwarning("Update available", f"{latest} is available, but no download URL for your platform.")
             return
@@ -514,57 +533,12 @@ class CsvCombinerGUI(BaseTk):
         ttk.Button(btns, text="Auto-download", command=auto_download).grid(row=0, column=1)
         ttk.Button(btns, text="Later", command=dlg.destroy).grid(row=0, column=2, padx=(8,0))
 
-    # ----- In-place update + restart (Windows). On non-frozen builds, just open file.
-    def _apply_update_and_restart(self, downloaded_path: Path):
-        """Replace the running EXE with downloaded_path and restart (Windows)."""
-        if not getattr(sys, "frozen", False):
-            # Running from source (e.g., VS Code): just open the downloaded file
-            try:
-                os.startfile(str(downloaded_path))
-            except Exception:
-                webbrowser.open(str(downloaded_path.parent))
-            return
-
-        if platform.system() != "Windows":
-            webbrowser.open(str(downloaded_path.parent))
-            messagebox.showinfo("Update downloaded", f"Saved:\n{downloaded_path}\n\nClose the app and run the new file.")
-            return
-
-        app_exe = Path(sys.executable).resolve()
-        exe_name = app_exe.name
-        tmpdir = Path(tempfile.gettempdir()) / f"{APP_NAME.replace(' ', '')}_updates"
-        tmpdir.mkdir(parents=True, exist_ok=True)
-        updater_bat = tmpdir / "apply_update_and_restart.bat"
-
-        updater_bat.write_text(fr"""@echo off
-setlocal enableextensions
-set "NEW={downloaded_path}"
-set "APP={app_exe}"
-
-:waitloop
-tasklist /FI "IMAGENAME eq {exe_name}" | find /I "{exe_name}" >NUL
-if %ERRORLEVEL%==0 (
-  timeout /t 1 /nobreak >nul
-  goto waitloop
-)
-
-move /y "%NEW%" "%APP%" >NUL
-start "" "%APP%"
-del "%%~f0"
-""", encoding="utf-8")
-
-        try:
-            subprocess.Popen(["cmd", "/c", str(updater_bat)], close_fds=True)
-        finally:
-            self.after(50, self.destroy)
-
     def _download_update(self, url: str, expected_sha256: str):
         if hasattr(self, "status_var"):
             self.status_var.set("Downloading update…")
 
         def worker():
             try:
-                # Add a User-Agent so GitHub will serve the asset
                 req = urllib.request.Request(
                     url,
                     headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"}
@@ -572,7 +546,6 @@ del "%%~f0"
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     chunk = 1024 * 128
 
-                    # Try to get a friendly filename from the response headers
                     filename = url.split("/")[-1] or "update.bin"
                     cd = resp.headers.get("Content-Disposition", "")
                     if "filename=" in cd:
@@ -600,9 +573,17 @@ del "%%~f0"
                 def done():
                     if hasattr(self, "status_var"):
                         self.status_var.set(f"Update downloaded: {out_path}")
-                    # Apply update in-place and restart
-                    self._apply_update_and_restart(out_path)
-
+                    sys_plat = platform.system()
+                    if sys_plat == "Windows":
+                        os.startfile(str(out_path))
+                    elif sys_plat == "Darwin":
+                        subprocess.run(["open", str(out_path)], check=False)
+                    else:
+                        webbrowser.open(str(out_path.parent))
+                    messagebox.showinfo(
+                        "Update downloaded",
+                        f"Saved:\n{out_path}\n\nClose the app and run the installer/new EXE to update."
+                    )
                 self.after(0, done)
 
             except Exception as e:
@@ -612,24 +593,13 @@ del "%%~f0"
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _resource_path(self, rel: str) -> str:
-        base = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
-        return str(Path(base, rel))
-
-    def _set_icon(self):
-        try:
-            if platform.system() == "Windows":
-                self.iconbitmap(self._resource_path("dinologo.ico"))
-            else:
-                self._icon_img = tk.PhotoImage(file=self._resource_path("dinologo.png"))
-                self.iconphoto(True, self._icon_img)  # keep a ref on self
-        except Exception:
-            pass
-
+    @staticmethod
+    def _resource_path(name: str) -> str:
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        return str(base / name)
 
     @staticmethod
     def _version_tuple(s: str):
-        """Parse '1.2.3' to a comparable tuple."""
         parts = []
         for p in s.split("."):
             num = "".join(ch for ch in p if ch.isdigit())
