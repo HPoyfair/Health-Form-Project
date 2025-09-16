@@ -10,7 +10,7 @@ import sys, json, urllib.request, hashlib, tempfile, webbrowser, platform, os
 # App constants
 # ---------------------------------------------------------------------------
 APP_NAME = "HealthForm"
-APP_VERSION = "0.1.6"   # logo placement test (under the Output CSV row)
+APP_VERSION = "0.1.7"   # logo placement test (under the Output CSV row)
 # Use the STABLE "raw" URL (no revision hash) so edits to the Gist are seen:
 UPDATE_MANIFEST_URL = (
     "https://gist.githubusercontent.com/HPoyfair/429ed78559d6247b16f8386acb6e8330/raw/manifest.json"
@@ -589,7 +589,14 @@ class CsvCombinerGUI(BaseTk):
             except Exception as e:
                 if hasattr(self, "status_var"):
                     self.status_var.set("Download failed.")
-                self.after(0, lambda: messagebox.showerror("Download failed", str(e)))
+                # Build a more helpful message
+                err_lines = [
+                    "Auto-download failed.",
+                    f"URL: {url!r}",
+                    f"Type: {type(e).__name__}",
+                    f"Detail: {getattr(e, 'reason', None) or getattr(e, 'msg', None) or str(e) or 'unknown'}",
+                ]
+                self.after(0, lambda: messagebox.showerror("Download failed", "\n".join(err_lines)))
 
         threading.Thread(target=worker, daemon=True).start()
 
