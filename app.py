@@ -10,13 +10,13 @@ import sys, json, urllib.request, hashlib, tempfile, webbrowser, platform, os
 # App constants
 # ---------------------------------------------------------------------------
 APP_NAME = "HealthForm"
-APP_VERSION = "0.1.4"   # <-- bump this each client release (blue background test)
+APP_VERSION = "0.1.5"   # bump when you cut a new release
 # Use the STABLE "raw" URL (no revision hash) so edits to the Gist are seen:
 UPDATE_MANIFEST_URL = (
     "https://gist.githubusercontent.com/HPoyfair/429ed78559d6247b16f8386acb6e8330/raw/manifest.json"
 )
 
-# Simple blue theme color (visible change for update test)
+# Simple blue theme color (visible change)
 COLOR_BG = "#1e90ff"  # DodgerBlue
 
 
@@ -36,12 +36,14 @@ except Exception:
 class CsvCombinerGUI(BaseTk):
     def __init__(self):
         super().__init__()
+        self._set_icon()
+
 
         # ---- Window basics
         self.title("CSV Combiner — GUI Shell")
         self.geometry("900x520")
 
-        # ---- Blue theme (frames/labels)
+        # ---- Blue theme
         self.configure(bg=COLOR_BG)
         style = ttk.Style(self)
         style.configure("Blue.TFrame", background=COLOR_BG)
@@ -483,9 +485,9 @@ class CsvCombinerGUI(BaseTk):
 
         plat = platform.system().lower()   # "windows", "darwin", "linux"
         section = data["windows"] if plat == "windows" else data.get("mac", {})
-        url = section.get("url")
-        page = section.get("page")  # optional pretty page
-        sha = section.get("sha256", "")
+        url  = section.get("url")
+        page = section.get("page") or data.get("page", "")
+        sha  = section.get("sha256", "")
         if not url:
             messagebox.showwarning("Update available", f"{latest} is available, but no download URL for your platform.")
             return
@@ -511,6 +513,50 @@ class CsvCombinerGUI(BaseTk):
         ttk.Button(btns, text="Open download page", command=open_page).grid(row=0, column=0, padx=(0,8))
         ttk.Button(btns, text="Auto-download", command=auto_download).grid(row=0, column=1)
         ttk.Button(btns, text="Later", command=dlg.destroy).grid(row=0, column=2, padx=(8,0))
+
+    # ----- In-place update + restart (Windows). On non-frozen builds, just open file.
+    def _apply_update_and_restart(self, downloaded_path: Path):
+        """Replace the running EXE with downloaded_path and restart (Windows)."""
+        if not getattr(sys, "frozen", False):
+            # Running from source (e.g., VS Code): just open the downloaded file
+            try:
+                os.startfile(str(downloaded_path))
+            except Exception:
+                webbrowser.open(str(downloaded_path.parent))
+            return
+
+        if platform.system() != "Windows":
+            webbrowser.open(str(downloaded_path.parent))
+            messagebox.showinfo("Update downloaded", f"Saved:\n{downloaded_path}\n\nClose the app and run the new file.")
+            return
+
+        app_exe = Path(sys.executable).resolve()
+        exe_name = app_exe.name
+        tmpdir = Path(tempfile.gettempdir()) / f"{APP_NAME.replace(' ', '')}_updates"
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        updater_bat = tmpdir / "apply_update_and_restart.bat"
+
+        updater_bat.write_text(fr"""@echo off
+setlocal enableextensions
+set "NEW={downloaded_path}"
+set "APP={app_exe}"
+
+:waitloop
+tasklist /FI "IMAGENAME eq {exe_name}" | find /I "{exe_name}" >NUL
+if %ERRORLEVEL%==0 (
+  timeout /t 1 /nobreak >nul
+  goto waitloop
+)
+
+move /y "%NEW%" "%APP%" >NUL
+start "" "%APP%"
+del "%%~f0"
+""", encoding="utf-8")
+
+        try:
+            subprocess.Popen(["cmd", "/c", str(updater_bat)], close_fds=True)
+        finally:
+            self.after(50, self.destroy)
 
     def _download_update(self, url: str, expected_sha256: str):
         if hasattr(self, "status_var"):
@@ -554,20 +600,9 @@ class CsvCombinerGUI(BaseTk):
                 def done():
                     if hasattr(self, "status_var"):
                         self.status_var.set(f"Update downloaded: {out_path}")
-                    # Open/reveal the file
-                    sys_plat = platform.system()
-                    if sys_plat == "Windows":
-                        os.startfile(str(out_path))
-                        # Or to open the folder with the file selected:
-                        # subprocess.run(["explorer", "/select,", str(out_path)], check=False)
-                    elif sys_plat == "Darwin":
-                        subprocess.run(["open", str(out_path)], check=False)
-                    else:
-                        webbrowser.open(str(out_path.parent))
-                    messagebox.showinfo(
-                        "Update downloaded",
-                        f"Saved:\n{out_path}\n\nClose the app and run the installer/new EXE to update."
-                    )
+                    # Apply update in-place and restart
+                    self._apply_update_and_restart(out_path)
+
                 self.after(0, done)
 
             except Exception as e:
@@ -576,6 +611,21 @@ class CsvCombinerGUI(BaseTk):
                 self.after(0, lambda: messagebox.showerror("Download failed", str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _resource_path(self, rel: str) -> str:
+        base = getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
+        return str(Path(base, rel))
+
+    def _set_icon(self):
+        try:
+            if platform.system() == "Windows":
+                self.iconbitmap(self._resource_path("dinologo.ico"))
+            else:
+                self._icon_img = tk.PhotoImage(file=self._resource_path("dinologo.png"))
+                self.iconphoto(True, self._icon_img)  # keep a ref on self
+        except Exception:
+            pass
+
 
     @staticmethod
     def _version_tuple(s: str):
