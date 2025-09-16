@@ -1,27 +1,34 @@
 # app.py
 import csv
+import os
+import sys
+import json
+import time
+import shutil
+import ctypes
+import hashlib
+import platform
+import tempfile
+import threading
+import subprocess
+import urllib.request
+from pathlib import Path
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from pathlib import Path
-import subprocess, threading
-import sys, json, urllib.request, hashlib, tempfile, webbrowser, platform, os
 
 # ---------------------------------------------------------------------------
 # App constants
 # ---------------------------------------------------------------------------
 APP_NAME = "HealthForm"
-APP_VERSION = "0.1.7"   # logo placement test (under the Output CSV row)
-# Use the STABLE "raw" URL (no revision hash) so edits to the Gist are seen:
+APP_VERSION = "0.1.8"  # bump per release
 UPDATE_MANIFEST_URL = (
     "https://gist.githubusercontent.com/HPoyfair/429ed78559d6247b16f8386acb6e8330/raw/manifest.json"
 )
-
-# Simple blue theme color
 COLOR_BG = "#1e90ff"  # DodgerBlue
 
-
 # ---------------------------------------------------------------------------
-# Drag & Drop support (optional)
+# Drag & Drop (optional)
 # ---------------------------------------------------------------------------
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -33,12 +40,178 @@ except Exception:
     BaseTk = tk.Tk
 
 
+# ========================= Self-replace bootstrap ============================
+def _resource_path(name: str) -> str:
+    """Return absolute path to resource (works in PyInstaller)."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return str(base / name)
+
+
+def _known_desktop_dir() -> Path:
+    """
+    Try to get the real Desktop path on Windows (localized / redirected).
+    Fallback to ~/Desktop elsewhere.
+    """
+    if platform.system() != "Windows":
+        return Path.home() / "Desktop"
+
+    # SHGetKnownFolderPath(FOLDERID_Desktop, 0, 0, *ppszPath)
+    try:
+        from uuid import UUID
+
+        _ole32 = ctypes.windll.ole32
+        _shell32 = ctypes.windll.shell32
+        _ole32.CoTaskMemFree.restype = None
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+            def __init__(self, uuidstr):
+                u = UUID(uuidstr)
+                ctypes.Structure.__init__(
+                    self,
+                    u.fields[0],
+                    u.fields[1],
+                    u.fields[2],
+                    (ctypes.c_ubyte * 8).from_buffer_copy(u.bytes[8:]),
+                )
+
+        # FOLDERID_Desktop
+        fid = GUID("{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}")
+        ppath = ctypes.c_wchar_p()
+        if _shell32.SHGetKnownFolderPath(ctypes.byref(fid), 0, 0, ctypes.byref(ppath)) == 0:
+            p = Path(ppath.value)
+            _ole32.CoTaskMemFree(ppath)
+            return p
+    except Exception:
+        pass
+
+    return Path.home() / "Desktop"
+
+
+def _create_or_update_shortcut(target_exe: Path, icon_path: Path | None = None):
+    """
+    Create/refresh a desktop shortcut named APP_NAME.lnk pointing to target_exe.
+    Uses PowerShell (no extra Python packages required).
+    """
+    if platform.system() != "Windows":
+        return
+
+    desktop = _known_desktop_dir()
+    desktop.mkdir(parents=True, exist_ok=True)
+    lnk_path = desktop / f"{APP_NAME}.lnk"
+
+    # Build a tiny PowerShell script to (re)create the shortcut.
+    ps = (
+        "$W = New-Object -ComObject WScript.Shell; "
+        f"$S = $W.CreateShortcut('{str(lnk_path)}'); "
+        f"$S.TargetPath = '{str(target_exe)}'; "
+        f"$S.WorkingDirectory = '{str(target_exe.parent)}'; "
+        + (f"$S.IconLocation = '{str(icon_path)},0'; " if icon_path else "")
+        + "$S.Save()"
+    )
+
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        # Completely optional; ignore failures.
+        pass
+
+
+def _self_replace_if_needed() -> bool:
+    """
+    If launched as a staged updater, perform replacement then start the final EXE.
+    Returns True if we handled replacement and already spawned the final app.
+    """
+    if "--self-replace" not in sys.argv:
+        return False
+
+    # Args: --self-replace <target-name> [--cleanup <old-staged-path>]
+    args = sys.argv[:]
+    try:
+        i = args.index("--self-replace")
+        target_name = args[i + 1]
+    except Exception:
+        target_name = Path(sys.executable).with_suffix(".exe").name
+
+    staged = Path(sys.executable).resolve()
+    app_dir = staged.parent
+    target = app_dir / target_name
+
+    # If we were also passed a path to clean up after we hand off, keep it.
+    cleanup_path = None
+    if "--cleanup" in args:
+        j = args.index("--cleanup")
+        if j + 1 < len(args):
+            cleanup_path = Path(args[j + 1])
+
+    # Try a few times in case the old EXE hasn't closed yet.
+    for _ in range(60):  # up to ~6 seconds
+        try:
+            # Replace target atomically via temp -> replace
+            tmp = target.with_suffix(target.suffix + ".tmp")
+            shutil.copy2(staged, tmp)
+            os.replace(tmp, target)
+            break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        # Give up; run staged so the app at least launches.
+        subprocess.Popen([str(staged)], close_fds=True)
+        os._exit(0)
+
+    # Launch the final EXE, asking it to delete this staged file.
+    cmd = [str(target)]
+    if staged.exists():
+        cmd += ["--cleanup", str(staged)]
+    subprocess.Popen(cmd, close_fds=True)
+
+    # Exit this staged process.
+    os._exit(0)
+
+
+def _cleanup_if_requested():
+    """If launched with --cleanup <path>, try to delete that file quietly."""
+    if "--cleanup" in sys.argv:
+        try:
+            i = sys.argv.index("--cleanup")
+            if i + 1 < len(sys.argv):
+                p = Path(sys.argv[i + 1])
+                for _ in range(50):
+                    try:
+                        if p.exists():
+                            p.unlink()
+                        break
+                    except Exception:
+                        time.sleep(0.1)
+        except Exception:
+            pass
+
+
+# Early hooks before the GUI starts.
+if _self_replace_if_needed():
+    # Already handled; process will exit inside the helper.
+    pass
+_cleanup_if_requested()
+
+
+# =============================== Main GUI ===================================
 class CsvCombinerGUI(BaseTk):
     def __init__(self):
         super().__init__()
 
         # ---- Window basics
-        self.title("CSV Combiner — GUI Shell")
+        self.title(f"CSV Combiner — GUI Shell v{APP_VERSION}")
         self.geometry("900x520")
 
         # ---- Blue theme (frames/labels)
@@ -51,7 +224,7 @@ class CsvCombinerGUI(BaseTk):
         self.input_files: list[Path] = []
         self.output_path_var = tk.StringVar(self, "")
 
-        # ---- Root layout: 2 equal columns that stretch
+        # ---- Root layout
         self.columnconfigure(0, weight=1, uniform="cols")
         self.columnconfigure(1, weight=1, uniform="cols")
         self.rowconfigure(0, weight=1)
@@ -72,16 +245,13 @@ class CsvCombinerGUI(BaseTk):
 
         ttk.Label(left, text="Input CSV files", style="Blue.TLabel").grid(row=0, column=0, sticky="w")
 
-        # Listbox + vertical scrollbar
         list_wrap = ttk.Frame(left, style="Blue.TFrame")
         list_wrap.grid(row=1, column=0, sticky="nsew", pady=(6, 6))
         list_wrap.rowconfigure(0, weight=1)
         list_wrap.columnconfigure(0, weight=1)
 
         self.input_list = tk.Listbox(
-            list_wrap,
-            selectmode=tk.EXTENDED,
-            exportselection=False
+            list_wrap, selectmode=tk.EXTENDED, exportselection=False
         )
         self.input_list.grid(row=0, column=0, sticky="nsew")
 
@@ -89,15 +259,12 @@ class CsvCombinerGUI(BaseTk):
         yscroll.grid(row=0, column=1, sticky="ns")
         self.input_list.configure(yscrollcommand=yscroll.set)
 
-        # Enable OS drag & drop if available
         if DND_AVAILABLE:
             self.input_list.drop_target_register(DND_FILES)
             self.input_list.dnd_bind("<<Drop>>", self._on_drop_files)
 
-        # Double-click to preview
         self.input_list.bind("<Double-1>", self._on_input_double_click)
 
-        # Buttons row
         btns = ttk.Frame(left, style="Blue.TFrame")
         btns.grid(row=2, column=0, sticky="ew")
         for c in range(3):
@@ -107,7 +274,7 @@ class CsvCombinerGUI(BaseTk):
         ttk.Button(btns, text="Remove selected", command=self.remove_selected).grid(row=0, column=1, sticky="ew", padx=6)
         ttk.Button(btns, text="Clear", command=self.clear_inputs).grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
-    # ========================= Right panel (output + logo beneath)
+    # ========================= Right panel (output + logo)
     def _build_right_panel(self):
         right = ttk.Frame(self, padding=12, style="Blue.TFrame")
         right.grid(row=0, column=1, sticky="nsew")
@@ -119,47 +286,34 @@ class CsvCombinerGUI(BaseTk):
         row.grid(row=1, column=0, sticky="ew", pady=(6, 6))
         row.columnconfigure(0, weight=1)
 
-        # Entry <-> StringVar two-way binding
         self.output_entry = ttk.Entry(row, textvariable=self.output_path_var)
         self.output_entry.grid(row=0, column=0, sticky="ew")
 
         ttk.Button(row, text="Choose…", command=self.choose_output).grid(row=0, column=1, padx=(6, 0))
         ttk.Label(right, text="Tip: pick a name like combined.csv", style="Blue.TLabel").grid(row=2, column=0, sticky="w")
 
-        # ---- Dino logo UNDER the output row (aligned to the right)
-                # ---- Dino logo centered UNDER the output row
-       # ---- Centered, larger dino logo (under the tip)
+        # Centered, larger dino logo under the tip
         try:
-            logo_path = self._resource_path("dinologo.png")
+            logo_path = _resource_path("dinologo.png")
             src = tk.PhotoImage(file=logo_path)
 
-            # upscale to ~300 px wide using integer zoom (no Pillow needed)
-            target_w = 380
+            target_w = 450
             z = max(1, round(target_w / src.width()))
             img = src.zoom(z, z)
-            # if we overshoot a lot, gently downsample
             if img.width() > target_w:
                 div = max(1, round(img.width() / target_w))
                 if div > 1:
                     img = img.subsample(div, div)
 
-            self._logo_image = img  # keep a reference
-
-            # flexible area that takes remaining vertical space
+            self._logo_image = img
             right.rowconfigure(3, weight=1)
             logo_area = ttk.Frame(right, style="Blue.TFrame")
             logo_area.grid(row=3, column=0, sticky="nsew", pady=(8, 8))
             logo_area.columnconfigure(0, weight=1)
             logo_area.rowconfigure(0, weight=1)
-
-            # centered horizontally and vertically (no sticky)
-            ttk.Label(logo_area, image=self._logo_image, style="Blue.TLabel").grid(
-                row=0, column=0
-            )
+            ttk.Label(logo_area, image=self._logo_image, style="Blue.TLabel").grid(row=0, column=0)
         except Exception as e:
             print("Logo load failed:", e)
-
-
 
     # ========================= Status bar
     def _build_statusbar(self):
@@ -230,15 +384,13 @@ class CsvCombinerGUI(BaseTk):
         self.output_path_var.set(path)
         self.status_var.set(f"Output set: {path}")
 
-    # ========================= Listbox events
+    # ========================= Listbox / DnD
     def _on_input_double_click(self, event):
         index = self.input_list.nearest(event.y)
         if index < 0 or index >= len(self.input_files):
             return
-        path = self.input_files[index]
-        self._open_csv_preview(path)
+        self._open_csv_preview(self.input_files[index])
 
-    # ========================= Drag & Drop handler
     def _on_drop_files(self, event):
         if not event.data:
             return
@@ -355,7 +507,7 @@ class CsvCombinerGUI(BaseTk):
         for r in rows:
             tree.insert("", tk.END, values=r)
 
-    # ========================= View/menu helpers
+    # ========================= Helpers
     def _refresh_input_list(self):
         self.input_list.delete(0, tk.END)
         for p in self.input_files:
@@ -371,7 +523,7 @@ class CsvCombinerGUI(BaseTk):
         menubar.add_cascade(label="Help", menu=helpmenu)
         self.config(menu=menubar)
 
-    # ========================= Dev/git updater (for repo clones)
+    # ========================= Dev/git updater
     def check_for_updates(self):
         def worker():
             try:
@@ -463,13 +615,13 @@ class CsvCombinerGUI(BaseTk):
     def check_for_updates_unified(self, silent: bool = False):
         app_dir = Path(__file__).resolve().parent
         in_git = (app_dir / ".git").exists()
-        is_frozen = getattr(sys, "frozen", False)  # True in PyInstaller builds
+        is_frozen = getattr(sys, "frozen", False)
         if in_git and not is_frozen:
             return self.check_for_updates()
         else:
             return self.check_for_updates_packaged(silent=silent)
 
-    # ========================= Client/manifest updater (for packaged apps)
+    # ========================= Client/manifest updater
     def check_for_updates_packaged(self, silent: bool = False):
         if hasattr(self, "status_var"):
             self.status_var.set("Checking for updates…")
@@ -493,7 +645,7 @@ class CsvCombinerGUI(BaseTk):
 
     def _handle_update_manifest(self, data: dict, silent: bool):
         latest = data.get("latest", "").strip()
-        notes  = data.get("changelog", "")
+        notes = data.get("changelog", "")
 
         if self._version_tuple(latest) <= self._version_tuple(APP_VERSION):
             if not silent:
@@ -519,21 +671,21 @@ class CsvCombinerGUI(BaseTk):
         frm.grid(sticky="nsew")
         frm.columnconfigure(0, weight=1); frm.rowconfigure(1, weight=1)
         ttk.Label(frm, text=f"A new version is available: {latest}", font=("", 11, "bold")).grid(sticky="w")
-        txt = tk.Text(frm, height=10, wrap="word"); txt.grid(sticky="nsew", pady=(8,8))
+        txt = tk.Text(frm, height=10, wrap="word"); txt.grid(sticky="nsew", pady=(8, 8))
         txt.insert("1.0", notes or "(no changelog provided)"); txt.configure(state="disabled")
-        btns = ttk.Frame(frm); btns.grid(sticky="e", pady=(8,0))
+        btns = ttk.Frame(frm); btns.grid(sticky="e", pady=(8, 0))
 
         def open_page():
             webbrowser.open(page or url); dlg.destroy()
 
         def auto_download():
-            dlg.destroy(); self._download_update(url, sha)
+            dlg.destroy(); self._download_update(url, sha, latest)
 
-        ttk.Button(btns, text="Open download page", command=open_page).grid(row=0, column=0, padx=(0,8))
+        ttk.Button(btns, text="Open download page", command=open_page).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(btns, text="Auto-download", command=auto_download).grid(row=0, column=1)
-        ttk.Button(btns, text="Later", command=dlg.destroy).grid(row=0, column=2, padx=(8,0))
+        ttk.Button(btns, text="Later", command=dlg.destroy).grid(row=0, column=2, padx=(8, 0))
 
-    def _download_update(self, url: str, expected_sha256: str):
+    def _download_update(self, url: str, expected_sha256: str, latest_version: str = ""):
         if hasattr(self, "status_var"):
             self.status_var.set("Downloading update…")
 
@@ -573,23 +725,24 @@ class CsvCombinerGUI(BaseTk):
                 def done():
                     if hasattr(self, "status_var"):
                         self.status_var.set(f"Update downloaded: {out_path}")
-                    sys_plat = platform.system()
-                    if sys_plat == "Windows":
-                        os.startfile(str(out_path))
-                    elif sys_plat == "Darwin":
-                        subprocess.run(["open", str(out_path)], check=False)
-                    else:
-                        webbrowser.open(str(out_path.parent))
+                    # Offer to apply now
+                    if platform.system() == "Windows":
+                        if messagebox.askyesno(
+                            "Update downloaded",
+                            "The update has been downloaded.\n\nApply it now and restart?"
+                        ):
+                            self._apply_update_now(out_path)
+                            return
+                    # Fallback message
                     messagebox.showinfo(
                         "Update downloaded",
-                        f"Saved:\n{out_path}\n\nClose the app and run the installer/new EXE to update."
+                        f"Saved:\n{out_path}\n\nClose the app and run the new EXE to update."
                     )
                 self.after(0, done)
 
             except Exception as e:
                 if hasattr(self, "status_var"):
                     self.status_var.set("Download failed.")
-                # Build a more helpful message
                 err_lines = [
                     "Auto-download failed.",
                     f"URL: {url!r}",
@@ -600,10 +753,41 @@ class CsvCombinerGUI(BaseTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    @staticmethod
-    def _resource_path(name: str) -> str:
-        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-        return str(base / name)
+    def _apply_update_now(self, downloaded_path: Path):
+        """Stage the update next to the running EXE and restart via a .new helper."""
+        if platform.system() != "Windows":
+            messagebox.showinfo("Unsupported", "Auto-apply is only implemented on Windows.")
+            return
+
+        # Where is the currently running EXE (works in frozen and script runs)?
+        app_exe = Path(sys.executable).resolve()
+        app_dir = app_exe.parent
+
+        # Copy the downloaded file into the app folder as "<current-name>.new.exe"
+        staged = app_exe.with_name(app_exe.stem + ".new" + app_exe.suffix)
+        try:
+            shutil.copy2(downloaded_path, staged)
+        except Exception as e:
+            messagebox.showerror("Apply failed", f"Couldn't stage update:\n{e}")
+            return
+
+        # Ensure/refresh a desktop shortcut (points to *actual* current exe name).
+        icon = Path(_resource_path("dinologo.ico")) if Path(_resource_path("dinologo.ico")).exists() else None
+        _create_or_update_shortcut(app_exe, icon)
+
+        # Launch staged helper with --self-replace to swap itself into the current EXE name.
+        cmd = [str(staged), "--self-replace", app_exe.name, "--cleanup", str(staged)]
+        try:
+            subprocess.Popen(cmd, close_fds=True)
+        except Exception as e:
+            messagebox.showerror("Apply failed", f"Couldn't launch updater:\n{e}")
+            return
+
+        # Quit this process immediately (the helper will take over).
+        try:
+            self.destroy()
+        finally:
+            os._exit(0)
 
     @staticmethod
     def _version_tuple(s: str):
