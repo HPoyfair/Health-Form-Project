@@ -5,8 +5,21 @@ from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 import subprocess, threading
 
+import sys, json, urllib.request, hashlib, tempfile, webbrowser, platform, os
 
-# --- Drag & Drop support (optional) -----------------------------------------
+# ---------------------------------------------------------------------------
+# App constants
+# ---------------------------------------------------------------------------
+APP_NAME = "HealthForm"
+APP_VERSION = "0.1.0"  # bump this each client release
+# Use the STABLE "raw" URL (no revision hash) so edits to the Gist are seen:
+UPDATE_MANIFEST_URL = (
+    "https://gist.githubusercontent.com/HPoyfair/429ed78559d6247b16f8386acb6e8330/raw/manifest.json"
+)
+
+# ---------------------------------------------------------------------------
+# Drag & Drop support (optional)
+# ---------------------------------------------------------------------------
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
     DND_AVAILABLE = True
@@ -26,8 +39,8 @@ class CsvCombinerGUI(BaseTk):
         self.geometry("900x520")
 
         # ---- App state (model)
-        self.input_files = []                           # list[Path]
-        self.output_path_var = tk.StringVar(self, "")   # bound to Entry on the right
+        self.input_files: list[Path] = []
+        self.output_path_var = tk.StringVar(self, "")
 
         # ---- Root layout: 2 equal columns that stretch
         self.columnconfigure(0, weight=1, uniform="cols")
@@ -38,16 +51,13 @@ class CsvCombinerGUI(BaseTk):
         self._build_left_panel()
         self._build_right_panel()
         self._build_statusbar()
-
         self._install_menu()
-
 
     # ========================= Left panel (inputs)
     def _build_left_panel(self):
         left = ttk.Frame(self, padding=12)
         left.grid(row=0, column=0, sticky="nsew")
 
-        # In this frame, row 1 (the list area) will stretch
         left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
 
@@ -126,7 +136,7 @@ class CsvCombinerGUI(BaseTk):
             self.status_var.set("Add cancelled.")
             return
 
-        existing = set(self.input_files)  # Paths are hashable
+        existing = set(self.input_files)
         added = 0
         for s in paths:
             p = Path(s)
@@ -175,13 +185,12 @@ class CsvCombinerGUI(BaseTk):
         if not path:
             self.status_var.set("Output selection cancelled.")
             return
-        self.output_path_var.set(path)          # Entry updates automatically
+        self.output_path_var.set(path)
         self.status_var.set(f"Output set: {path}")
 
     # ========================= Listbox events
     def _on_input_double_click(self, event):
         """Open preview for the row under the mouse."""
-        # Which visual row was double-clicked?
         index = self.input_list.nearest(event.y)
         if index < 0 or index >= len(self.input_files):
             return
@@ -212,24 +221,17 @@ class CsvCombinerGUI(BaseTk):
 
     # ========================= CSV preview
     def _open_csv_preview(self, path: Path, max_rows: int = 200):
-        """
-        Open a Toplevel window showing a preview of the CSV.
-        - Tries a few encodings.
-        - Auto-detects delimiter with csv.Sniffer (fallback to comma).
-        - Shows up to max_rows rows in a Treeview with H/V scrollbars.
-        """
+        """Open a Toplevel window showing a preview of the CSV."""
         if not path.exists():
             messagebox.showerror("Preview error", f"File not found:\n{path}")
             return
 
-        # Try encodings in order
         encodings_to_try = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
         chosen_enc = encodings_to_try[0]
         dialect = csv.excel
-        header = []
-        rows = []
-
+        header, rows = [], []
         last_err = None
+
         for enc in encodings_to_try:
             try:
                 with open(path, "r", encoding=enc, newline="") as f:
@@ -243,6 +245,7 @@ class CsvCombinerGUI(BaseTk):
                         has_header = csv.Sniffer().has_header(sample)
                     except Exception:
                         has_header = True
+
                     reader = csv.reader(f, dialect)
                     if has_header:
                         header = next(reader, [])
@@ -291,7 +294,6 @@ class CsvCombinerGUI(BaseTk):
         )
         info.grid(row=0, column=0, sticky="ew")
 
-        # Treeview with scrollbars
         frame = ttk.Frame(win, padding=(12, 0, 12, 12))
         frame.grid(row=1, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
@@ -308,35 +310,35 @@ class CsvCombinerGUI(BaseTk):
 
         tree.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
 
-        # Headings & column sizing
         for i, cid in enumerate(col_ids):
             title = header[i] if i < len(header) else f"col{i+1}"
             tree.heading(cid, text=title)
             tree.column(cid, width=140, minwidth=60, stretch=True, anchor="w")
 
-        # Insert rows
         for r in rows:
             tree.insert("", tk.END, values=r)
 
-    # ========================= View helper
+    # ========================= View/menu helpers
     def _refresh_input_list(self):
-        """Render self.input_files (list[Path]) into the Listbox."""
         self.input_list.delete(0, tk.END)
         for p in self.input_files:
             self.input_list.insert(tk.END, f"{p.name}   —   {p.parent}")
 
-        # ======== Menu
     def _install_menu(self):
         menubar = tk.Menu(self)
         helpmenu = tk.Menu(menubar, tearoff=0)
-        helpmenu.add_command(label="Check for updates…", command=self.check_for_updates)
+        # Unified checker (uses git when running from a repo, manifest otherwise)
+        helpmenu.add_command(label="Check for updates…", command=self.check_for_updates_unified)
+        # Optional explicit entries while you're testing:
+        helpmenu.add_separator()
+        helpmenu.add_command(label="Check for updates (client)…", command=self.check_for_updates_packaged)
+        helpmenu.add_command(label="Check for updates (dev/git)…", command=self.check_for_updates)
         menubar.add_cascade(label="Help", menu=helpmenu)
         self.config(menu=menubar)
 
-    # ======== Update: compare local HEAD to remote and prompt
+    # ========================= Dev/git updater (for repo clones)
     def check_for_updates(self):
         """Check whether the current branch is behind origin/<branch> (non-blocking)."""
-        # Run in background so UI stays responsive
         def worker():
             try:
                 app_dir = Path(__file__).resolve().parent
@@ -347,10 +349,7 @@ class CsvCombinerGUI(BaseTk):
                     ))
                     return
 
-                # Which branch are we on?
                 branch = self._git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=app_dir)
-
-                # Fetch remote info for this branch
                 self._git(["fetch", "origin", branch], cwd=app_dir)
 
                 local = self._git(["rev-parse", "--short", "HEAD"], cwd=app_dir)
@@ -358,23 +357,18 @@ class CsvCombinerGUI(BaseTk):
 
                 if local == remote:
                     self.after(0, lambda: tk.messagebox.showinfo(
-                        "You're up to date",
-                        f"Local {branch}: {local}\nRemote {branch}: {remote}"
+                        "You're up to date", f"Local {branch}: {local}\nRemote {branch}: {remote}"
                     ))
                     return
 
-                # How many commits behind?
                 ahead = self._git(["rev-list", "--left-right", "--count", f"HEAD...origin/{branch}"], cwd=app_dir)
-                # Format: "<ahead> <behind>" when comparing HEAD (left) vs origin/branch (right)
                 try:
                     ahead_n, behind_n = map(int, ahead.split())
                 except Exception:
                     ahead_n = behind_n = None
 
                 def prompt():
-                    msg = [f"Local {branch}:  {local}",
-                        f"Remote {branch}: {remote}",
-                        ""]
+                    msg = [f"Local {branch}:  {local}", f"Remote {branch}: {remote}", ""]
                     if behind_n is not None:
                         msg.append(f"Your branch is {behind_n} commit(s) behind, {ahead_n} ahead.")
                     msg.append("\nFast-forward pull now?")
@@ -395,14 +389,11 @@ class CsvCombinerGUI(BaseTk):
         def worker():
             try:
                 app_dir = Path(__file__).resolve().parent
-                # Make sure we’re on the right branch and have an upstream
                 self._git(["checkout", branch], cwd=app_dir)
-                # Ensure our local branch tracks origin/branch (safe if already set)
                 try:
                     self._git(["branch", "-u", f"origin/{branch}", branch], cwd=app_dir)
                 except Exception:
                     pass
-                # Fast-forward only (no merge commits)
                 self._git(["pull", "--ff-only", "origin", branch], cwd=app_dir)
 
                 def ok():
@@ -423,9 +414,7 @@ class CsvCombinerGUI(BaseTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ======== Helper to run git and capture output (raises on error)
     def _git(self, args, cwd: Path) -> str:
-        """Run a git command and return stdout (stripped). Raises on failure."""
         proc = subprocess.run(
             ["git", *args],
             cwd=str(cwd),
@@ -434,14 +423,153 @@ class CsvCombinerGUI(BaseTk):
             shell=False
         )
         if proc.returncode != 0:
-            # Prefer stderr; fall back to stdout
             msg = proc.stderr.strip() or proc.stdout.strip() or f"git {' '.join(args)} failed"
             raise RuntimeError(msg)
         return proc.stdout.strip()
 
+    def check_for_updates_unified(self, silent: bool = False):
+        """Use git-based updates for dev clones, or manifest-based for packaged clients."""
+        app_dir = Path(__file__).resolve().parent
+        in_git = (app_dir / ".git").exists()
+        is_frozen = getattr(sys, "frozen", False)  # True in PyInstaller builds
+        if in_git and not is_frozen:
+            return self.check_for_updates()
+        else:
+            return self.check_for_updates_packaged(silent=silent)
 
+    # ========================= Client/manifest updater (for packaged apps)
+    def check_for_updates_packaged(self, silent: bool = False):
+        """Fetch manifest and compare version to latest (non-blocking)."""
+        if hasattr(self, "status_var"):
+            self.status_var.set("Checking for updates…")
 
-        
+        def worker():
+            data = None
+            try:
+                req = urllib.request.Request(
+                    UPDATE_MANIFEST_URL,
+                    headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"}
+                )
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except Exception as e:
+                if not silent:
+                    self.after(0, lambda: messagebox.showerror("Update check failed", str(e)))
+                return
+            self.after(0, lambda: self._handle_update_manifest(data, silent))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _handle_update_manifest(self, data: dict, silent: bool):
+        latest = data.get("latest", "").strip()
+        notes  = data.get("changelog", "")
+
+        if self._version_tuple(latest) <= self._version_tuple(APP_VERSION):
+            if not silent:
+                messagebox.showinfo("You're up to date", f"{APP_NAME} {APP_VERSION} is the latest.")
+            if hasattr(self, "status_var"):
+                self.status_var.set("Ready")
+            return
+
+        plat = platform.system().lower()
+        section = data.get("windows" if "windows" in plat else "mac", {})
+        url = section.get("url")
+        sha = section.get("sha256", "")
+        if not url:
+            messagebox.showwarning("Update available", f"{latest} is available, but no download URL for your platform.")
+            return
+
+        dlg = tk.Toplevel(self); dlg.title(f"Update available — {latest}")
+        dlg.geometry("520x300"); dlg.transient(self); dlg.grab_set()
+        dlg.columnconfigure(0, weight=1); dlg.rowconfigure(1, weight=1)
+
+        frm = ttk.Frame(dlg, padding=12); frm.grid(sticky="nsew")
+        frm.columnconfigure(0, weight=1); frm.rowconfigure(1, weight=1)
+        ttk.Label(frm, text=f"A new version is available: {latest}", font=("", 11, "bold")).grid(sticky="w")
+        txt = tk.Text(frm, height=10, wrap="word"); txt.grid(sticky="nsew", pady=(8,8))
+        txt.insert("1.0", notes or "(no changelog provided)"); txt.configure(state="disabled")
+        btns = ttk.Frame(frm); btns.grid(sticky="e", pady=(8,0))
+
+        def open_page():
+            webbrowser.open(url); dlg.destroy()
+
+        def auto_download():
+            dlg.destroy(); self._download_update(url, sha)
+
+        ttk.Button(btns, text="Open download page", command=open_page).grid(row=0, column=0, padx=(0,8))
+        ttk.Button(btns, text="Auto-download", command=auto_download).grid(row=0, column=1)
+        ttk.Button(btns, text="Later", command=dlg.destroy).grid(row=0, column=2, padx=(8,0))
+
+    def _download_update(self, url: str, expected_sha256: str):
+        if hasattr(self, "status_var"):
+            self.status_var.set("Downloading update…")
+
+        def worker():
+            try:
+                # Add a User-Agent so GitHub will serve the asset
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"}
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    chunk = 1024 * 128
+
+                    # Try to get a friendly filename from the response headers
+                    filename = url.split("/")[-1] or "update.bin"
+                    cd = resp.headers.get("Content-Disposition", "")
+                    if "filename=" in cd:
+                        # handle: attachment; filename="HealthForm.exe"
+                        filename = cd.split("filename=", 1)[1].strip().strip('";')
+
+                    tmpdir = Path(tempfile.gettempdir()) / f"{APP_NAME.replace(' ', '')}_updates"
+                    tmpdir.mkdir(parents=True, exist_ok=True)
+                    out_path = tmpdir / filename
+
+                    h = hashlib.sha256()
+                    with open(out_path, "wb") as f:
+                        while True:
+                            buf = resp.read(chunk)
+                            if not buf:
+                                break
+                            f.write(buf)
+                            h.update(buf)
+
+                digest = h.hexdigest()
+                if expected_sha256 and digest.lower() != expected_sha256.lower():
+                    raise RuntimeError(f"SHA256 mismatch. Expected {expected_sha256}, got {digest}")
+
+                def done():
+                    if hasattr(self, "status_var"):
+                        self.status_var.set(f"Update downloaded: {out_path}")
+                    # Open/reveal the file
+                    sys_plat = platform.system()
+                    if sys_plat == "Windows":
+                        os.startfile(str(out_path))
+                    elif sys_plat == "Darwin":
+                        subprocess.run(["open", str(out_path)], check=False)
+                    else:
+                        webbrowser.open(str(out_path.parent))
+                    messagebox.showinfo(
+                        "Update downloaded",
+                        f"Saved:\n{out_path}\n\nClose the app and run the installer/new EXE to update."
+                    )
+                self.after(0, done)
+
+            except Exception as e:
+                if hasattr(self, "status_var"):
+                    self.status_var.set("Download failed.")
+                self.after(0, lambda: messagebox.showerror("Download failed", str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def _version_tuple(s: str):
+        """Parse '1.2.3' to a comparable tuple."""
+        parts = []
+        for p in s.split("."):
+            num = "".join(ch for ch in p if ch.isdigit())
+            parts.append(int(num) if num else 0)
+        return tuple(parts + [0] * (3 - len(parts)))
 
 
 if __name__ == "__main__":
