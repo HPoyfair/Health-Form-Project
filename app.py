@@ -11,7 +11,7 @@ import sys, json, urllib.request, hashlib, tempfile, webbrowser, platform, os
 # App constants
 # ---------------------------------------------------------------------------
 APP_NAME = "HealthForm"
-APP_VERSION = "0.1.0"  # bump this each client release
+APP_VERSION = "0.1.3"  # bump this each client release
 # Use the STABLE "raw" URL (no revision hash) so edits to the Gist are seen:
 UPDATE_MANIFEST_URL = (
     "https://gist.githubusercontent.com/HPoyfair/429ed78559d6247b16f8386acb6e8330/raw/manifest.json"
