@@ -4,3 +4,4 @@ cat > README.md << 'EOF'
 Simple GUI to pick multiple CSV files and choose an output CSV.
 Features: drag & drop, double-click preview, status bar.
 EOF
+testing
