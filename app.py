@@ -4,18 +4,21 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 import subprocess, threading
-
 import sys, json, urllib.request, hashlib, tempfile, webbrowser, platform, os
 
 # ---------------------------------------------------------------------------
 # App constants
 # ---------------------------------------------------------------------------
 APP_NAME = "HealthForm"
-APP_VERSION = "0.1.3"  # bump this each client release
+APP_VERSION = "0.1.4"   # <-- bump this each client release (blue background test)
 # Use the STABLE "raw" URL (no revision hash) so edits to the Gist are seen:
 UPDATE_MANIFEST_URL = (
     "https://gist.githubusercontent.com/HPoyfair/429ed78559d6247b16f8386acb6e8330/raw/manifest.json"
 )
+
+# Simple blue theme color (visible change for update test)
+COLOR_BG = "#1e90ff"  # DodgerBlue
+
 
 # ---------------------------------------------------------------------------
 # Drag & Drop support (optional)
@@ -38,6 +41,12 @@ class CsvCombinerGUI(BaseTk):
         self.title("CSV Combiner — GUI Shell")
         self.geometry("900x520")
 
+        # ---- Blue theme (frames/labels)
+        self.configure(bg=COLOR_BG)
+        style = ttk.Style(self)
+        style.configure("Blue.TFrame", background=COLOR_BG)
+        style.configure("Blue.TLabel", background=COLOR_BG, foreground="white")
+
         # ---- App state (model)
         self.input_files: list[Path] = []
         self.output_path_var = tk.StringVar(self, "")
@@ -55,16 +64,16 @@ class CsvCombinerGUI(BaseTk):
 
     # ========================= Left panel (inputs)
     def _build_left_panel(self):
-        left = ttk.Frame(self, padding=12)
+        left = ttk.Frame(self, padding=12, style="Blue.TFrame")
         left.grid(row=0, column=0, sticky="nsew")
 
         left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
 
-        ttk.Label(left, text="Input CSV files").grid(row=0, column=0, sticky="w")
+        ttk.Label(left, text="Input CSV files", style="Blue.TLabel").grid(row=0, column=0, sticky="w")
 
         # Listbox + vertical scrollbar
-        list_wrap = ttk.Frame(left)
+        list_wrap = ttk.Frame(left, style="Blue.TFrame")
         list_wrap.grid(row=1, column=0, sticky="nsew", pady=(6, 6))
         list_wrap.rowconfigure(0, weight=1)
         list_wrap.columnconfigure(0, weight=1)
@@ -89,7 +98,7 @@ class CsvCombinerGUI(BaseTk):
         self.input_list.bind("<Double-1>", self._on_input_double_click)
 
         # Buttons row
-        btns = ttk.Frame(left)
+        btns = ttk.Frame(left, style="Blue.TFrame")
         btns.grid(row=2, column=0, sticky="ew")
         for c in range(3):
             btns.columnconfigure(c, weight=1)
@@ -100,13 +109,13 @@ class CsvCombinerGUI(BaseTk):
 
     # ========================= Right panel (output)
     def _build_right_panel(self):
-        right = ttk.Frame(self, padding=12)
+        right = ttk.Frame(self, padding=12, style="Blue.TFrame")
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)  # Entry should stretch horizontally
 
-        ttk.Label(right, text="Output CSV file").grid(row=0, column=0, sticky="w")
+        ttk.Label(right, text="Output CSV file", style="Blue.TLabel").grid(row=0, column=0, sticky="w")
 
-        row = ttk.Frame(right)
+        row = ttk.Frame(right, style="Blue.TFrame")
         row.grid(row=1, column=0, sticky="ew", pady=(6, 6))
         row.columnconfigure(0, weight=1)    # make the Entry expand
 
@@ -115,10 +124,11 @@ class CsvCombinerGUI(BaseTk):
         self.output_entry.grid(row=0, column=0, sticky="ew")
 
         ttk.Button(row, text="Choose…", command=self.choose_output).grid(row=0, column=1, padx=(6, 0))
-        ttk.Label(right, text="Tip: pick a name like combined.csv", foreground="#666").grid(row=2, column=0, sticky="w")
+        ttk.Label(right, text="Tip: pick a name like combined.csv", style="Blue.TLabel").grid(row=2, column=0, sticky="w")
 
     # ========================= Status bar
     def _build_statusbar(self):
+        # Keep default style so the status text is readable over a neutral background
         bar = ttk.Frame(self, padding=(12, 6))
         bar.grid(row=1, column=0, columnspan=2, sticky="ew")
         bar.columnconfigure(0, weight=1)
@@ -471,9 +481,10 @@ class CsvCombinerGUI(BaseTk):
                 self.status_var.set("Ready")
             return
 
-        plat = platform.system().lower()
-        section = data.get("windows" if "windows" in plat else "mac", {})
+        plat = platform.system().lower()   # "windows", "darwin", "linux"
+        section = data["windows"] if plat == "windows" else data.get("mac", {})
         url = section.get("url")
+        page = section.get("page")  # optional pretty page
         sha = section.get("sha256", "")
         if not url:
             messagebox.showwarning("Update available", f"{latest} is available, but no download URL for your platform.")
@@ -483,7 +494,8 @@ class CsvCombinerGUI(BaseTk):
         dlg.geometry("520x300"); dlg.transient(self); dlg.grab_set()
         dlg.columnconfigure(0, weight=1); dlg.rowconfigure(1, weight=1)
 
-        frm = ttk.Frame(dlg, padding=12); frm.grid(sticky="nsew")
+        frm = ttk.Frame(dlg, padding=12)
+        frm.grid(sticky="nsew")
         frm.columnconfigure(0, weight=1); frm.rowconfigure(1, weight=1)
         ttk.Label(frm, text=f"A new version is available: {latest}", font=("", 11, "bold")).grid(sticky="w")
         txt = tk.Text(frm, height=10, wrap="word"); txt.grid(sticky="nsew", pady=(8,8))
@@ -491,7 +503,7 @@ class CsvCombinerGUI(BaseTk):
         btns = ttk.Frame(frm); btns.grid(sticky="e", pady=(8,0))
 
         def open_page():
-            webbrowser.open(url); dlg.destroy()
+            webbrowser.open(page or url); dlg.destroy()
 
         def auto_download():
             dlg.destroy(); self._download_update(url, sha)
@@ -518,8 +530,9 @@ class CsvCombinerGUI(BaseTk):
                     filename = url.split("/")[-1] or "update.bin"
                     cd = resp.headers.get("Content-Disposition", "")
                     if "filename=" in cd:
-                        # handle: attachment; filename="HealthForm.exe"
-                        filename = cd.split("filename=", 1)[1].strip().strip('";')
+                        fn = cd.split("filename=", 1)[1].strip().strip('";')
+                        if fn:
+                            filename = fn
 
                     tmpdir = Path(tempfile.gettempdir()) / f"{APP_NAME.replace(' ', '')}_updates"
                     tmpdir.mkdir(parents=True, exist_ok=True)
@@ -545,6 +558,8 @@ class CsvCombinerGUI(BaseTk):
                     sys_plat = platform.system()
                     if sys_plat == "Windows":
                         os.startfile(str(out_path))
+                        # Or to open the folder with the file selected:
+                        # subprocess.run(["explorer", "/select,", str(out_path)], check=False)
                     elif sys_plat == "Darwin":
                         subprocess.run(["open", str(out_path)], check=False)
                     else:
